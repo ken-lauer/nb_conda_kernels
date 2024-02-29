@@ -7,7 +7,6 @@ import sys
 import time
 import glob
 import psutil
-import shutil
 
 import os
 from os.path import join, split, dirname, basename, abspath
@@ -152,6 +151,8 @@ class CondaKernelSpecManager(KernelSpecManager):
             environment names as keys, and full paths as values.
         """
         conda_info = self._conda_info
+        if not conda_info:
+            raise RuntimeError("conda info unavailable/empty")
         if 'envs' in conda_info:
             envs = conda_info['envs']
             base_prefix = conda_info['conda_prefix']
@@ -164,17 +165,17 @@ class CondaKernelSpecManager(KernelSpecManager):
             envs_dirs = conda_info['envs_dirs']
             if not envs_dirs:
                 envs_dirs = [join(base_prefix, 'envs')]
-        else:
+        elif "envs directories" in conda_info:
             # micromamba
-            base_prefix = None
-            build_prefix = 'n/a'
-            envs_dirs = conda_info["envs directories"]
             return {
                 path: os.path.join(env_dir, path)
-                for env_dir in envs_dirs
+                for env_dir in conda_info["envs directories"]
+                if os.path.exists(env_dir) and os.path.isdir(env_dir)
                 for path in os.listdir(env_dir)
                 if os.path.isdir(os.path.join(env_dir, path))
             }
+        else:
+            raise RuntimeError("Unexpected conda_info dict")
 
         all_envs = {}
         for env_path in envs:
