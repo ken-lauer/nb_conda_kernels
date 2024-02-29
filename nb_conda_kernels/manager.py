@@ -7,6 +7,7 @@ import sys
 import time
 import glob
 import psutil
+import shutil
 
 import os
 from os.path import join, split, dirname, basename, abspath
@@ -18,6 +19,7 @@ CACHE_TIMEOUT = 60
 
 CONDA_EXE = os.environ.get("CONDA_EXE", "conda")
 
+MICROMAMBA_RUNNER_COMMAND = ['python', '-m', 'nb_conda_kernels.micromamba_runner']
 RUNNER_COMMAND = ['python', '-m', 'nb_conda_kernels.runner']
 
 
@@ -150,17 +152,30 @@ class CondaKernelSpecManager(KernelSpecManager):
             environment names as keys, and full paths as values.
         """
         conda_info = self._conda_info
-        envs = conda_info['envs']
-        base_prefix = conda_info['conda_prefix']
-        envs_prefix = join(base_prefix, 'envs')
-        build_prefix = join(base_prefix, 'conda-bld', '')
-        # Older versions of conda do not seem to include the base prefix
-        # in the environment list, but we do want to scan that
-        if base_prefix not in envs:
-            envs.insert(0, base_prefix)
-        envs_dirs = conda_info['envs_dirs']
-        if not envs_dirs:
-            envs_dirs = [join(base_prefix, 'envs')]
+        if 'envs' in conda_info:
+            envs = conda_info['envs']
+            base_prefix = conda_info['conda_prefix']
+            envs_prefix = join(base_prefix, 'envs')
+            build_prefix = join(base_prefix, 'conda-bld', '')
+            # Older versions of conda do not seem to include the base prefix
+            # in the environment list, but we do want to scan that
+            if base_prefix not in envs:
+                envs.insert(0, base_prefix)
+            envs_dirs = conda_info['envs_dirs']
+            if not envs_dirs:
+                envs_dirs = [join(base_prefix, 'envs')]
+        else:
+            # micromamba
+            base_prefix = None
+            build_prefix = 'n/a'
+            envs_dirs = conda_info["envs directories"]
+            return {
+                path: os.path.join(env_dir, path)
+                for env_dir in envs_dirs
+                for path in os.listdir(env_dir)
+                if os.path.isdir(os.path.join(env_dir, path))
+            }
+
         all_envs = {}
         for env_path in envs:
             if self.env_filter is not None:
@@ -190,6 +205,110 @@ class CondaKernelSpecManager(KernelSpecManager):
             all_envs[env_name] = env_path
         return all_envs
 
+    def _mamba_all_specs(self):
+        all_specs = {}
+        all_envs = self._all_envs()
+        micromamba = shutil.which("micromamba")
+        for env_name, env_path in all_envs.items():
+            kspec_base = join(env_path, 'share', 'jupyter', 'kernels')
+            kspec_glob = glob.glob(join(kspec_base, '*', 'kernel.json'))
+            for spec_path in kspec_glob:
+                try:
+                    with open(spec_path, 'rb') as fp:
+                        data = fp.read()
+                    spec = json.loads(data.decode('utf-8'))
+                except Exception as err:
+                    self.log.error("[nb_conda_kernels] error loading %s:\n%s",
+                                   spec_path, err)
+                    continue
+                kernel_dir = dirname(spec_path).lower()
+                kernel_name = raw_kernel_name = basename(kernel_dir)
+                if self.kernelspec_path is not None and kernel_name.startswith("conda-"):
+                    self.log.debug("[nb_conda_kernels] Skipping kernel spec %s", spec_path)
+                    continue  # Ensure to skip dynamically added kernel spec within the environment prefix
+                # We're doing a few of these adjustments here to ensure that
+                # the naming convention is as close as possible to the previous
+                # versions of this package; particularly so that the tests
+                # pass without change.
+                if kernel_name in ('python2', 'python3'):
+                    kernel_name = 'py'
+                elif kernel_name == 'ir':
+                    kernel_name = 'r'
+                kernel_prefix = '' if env_name == 'root' else 'env-'
+                kernel_name = u'conda-{}{}-{}'.format(kernel_prefix, env_name, kernel_name)
+                # Replace invalid characters with dashes
+                kernel_name = self.clean_kernel_name(kernel_name)
+
+                display_prefix = spec['display_name']
+                if display_prefix.startswith('Python'):
+                    display_prefix = 'Python'
+                display_name = self.name_format.format(
+                    display_prefix,
+                    env_name,
+                    conda_kernel=kernel_name,
+                    display_name=spec['display_name'],
+                    environment=env_name,
+                    kernel=raw_kernel_name,
+                    language=display_prefix,
+                )
+                if env_path == sys.prefix:
+                    display_name += ' *'
+                spec['display_name'] = display_name
+                if env_path != sys.prefix:
+                    spec['argv'] = MICROMAMBA_RUNNER_COMMAND + [micromamba, env_path] + spec['argv']
+                metadata = spec.get('metadata', {})
+                metadata.update({
+                    'conda_env_name': env_name,
+                    'conda_env_path': env_path
+                })
+                spec['metadata'] = metadata
+
+                if self.kernelspec_path is not None:
+                    # Install the kernel spec
+                    try:
+                        destination = self.install_kernel_spec(
+                            kernel_dir,
+                            kernel_name=kernel_name,
+                            user=self._kernel_user,
+                            prefix=self._kernel_prefix
+                        )
+                        # Update the kernel spec
+                        kernel_spec = join(destination, "kernel.json")
+                        tmp_spec = spec.copy()
+                        if env_path == sys.prefix:  # Add the conda runner to the installed kernel spec
+                            tmp_spec['argv'] = MICROMAMBA_RUNNER_COMMAND + [micromamba, env_path] + spec['argv']
+                        with open(kernel_spec, "w") as f:
+                            json.dump(tmp_spec, f)
+                    except OSError as error:
+                        self.log.warning(
+                            u"[nb_conda_kernels] Fail to install kernel '{}'.".format(kernel_dir),
+                            exc_info=error
+                        )
+
+                # resource_dir is not part of the spec file, so it is added at the latest time
+                spec['resource_dir'] = abspath(kernel_dir)
+
+                all_specs[kernel_name] = spec
+
+        # Remove non-existing conda environments
+        if self.kernelspec_path is not None:
+            kernels_destination = self._get_destination_dir(
+                "",
+                user=self._kernel_user,
+                prefix=self._kernel_prefix
+            )
+            for folder in glob.glob(join(kernels_destination, "*", "kernel.json")):
+                kernel_dir = dirname(folder)
+                kernel_name = basename(kernel_dir)
+                if kernel_name.startswith("conda-") and kernel_name not in all_specs:
+                    self.log.info("Removing %s", kernel_dir)
+                    if os.path.islink(kernel_dir):
+                        os.remove(kernel_dir)
+                    else:
+                        shutil.rmtree(kernel_dir)
+
+        return all_specs
+
     def _all_specs(self):
         """ Find the all kernel specs in all environments.
 
@@ -201,9 +320,12 @@ class CondaKernelSpecManager(KernelSpecManager):
             relatively expensive.
         """
 
-        all_specs = {}
         # We need to be able to find conda-run in the base conda environment
         # even if this package is not running there
+        if 'conda_prefix' not in self._conda_info:
+            return self._mamba_all_specs()
+
+        all_specs = {}
         conda_prefix = self._conda_info['conda_prefix']
         all_envs = self._all_envs()
         for env_name, env_path in all_envs.items():
