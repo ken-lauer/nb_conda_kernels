@@ -167,6 +167,7 @@ class CondaKernelSpecManager(KernelSpecManager):
                 envs_dirs = [join(base_prefix, 'envs')]
         elif "envs directories" in conda_info:
             # micromamba
+            self.log.debug("Detected micromamba. Info: %s", conda_info)
             return {
                 path: os.path.join(env_dir, path)
                 for env_dir in conda_info["envs directories"]
@@ -208,12 +209,19 @@ class CondaKernelSpecManager(KernelSpecManager):
 
     def _mamba_all_specs(self):
         all_specs = {}
-        all_envs = self._all_envs()
+        try:
+            all_envs = self._all_envs()
+        except Exception:
+            self.log.exception("Unable to get envs")
+            return {}
+
         micromamba = shutil.which("micromamba")
+        self.log.debug("Micromamba all specs envs=%s", all_envs)
         for env_name, env_path in all_envs.items():
             kspec_base = join(env_path, 'share', 'jupyter', 'kernels')
             kspec_glob = glob.glob(join(kspec_base, '*', 'kernel.json'))
             for spec_path in kspec_glob:
+                self.log.debug("Micromamba env: %s path=%s spec_path=%s", env_name, env_path, spec_path)
                 try:
                     with open(spec_path, 'rb') as fp:
                         data = fp.read()
@@ -227,18 +235,21 @@ class CondaKernelSpecManager(KernelSpecManager):
                 if self.kernelspec_path is not None and kernel_name.startswith("conda-"):
                     self.log.debug("[nb_conda_kernels] Skipping kernel spec %s", spec_path)
                     continue  # Ensure to skip dynamically added kernel spec within the environment prefix
-                # We're doing a few of these adjustments here to ensure that
-                # the naming convention is as close as possible to the previous
-                # versions of this package; particularly so that the tests
-                # pass without change.
-                if kernel_name in ('python2', 'python3'):
-                    kernel_name = 'py'
-                elif kernel_name == 'ir':
-                    kernel_name = 'r'
-                kernel_prefix = '' if env_name == 'root' else 'env-'
-                kernel_name = u'conda-{}{}-{}'.format(kernel_prefix, env_name, kernel_name)
-                # Replace invalid characters with dashes
-                kernel_name = self.clean_kernel_name(kernel_name)
+
+                if env_name == kernel_name:
+                    pass
+                else:
+                    # We're doing a few of these adjustments here to ensure that
+                    # the naming convention is as close as possible to the previous
+                    # versions of this package; particularly so that the tests
+                    # pass without change.
+                    if kernel_name in ('python2', 'python3'):
+                        kernel_name = 'py'
+                    elif kernel_name == 'ir':
+                        kernel_name = 'r'
+                    kernel_name = u'{}-{}'.format(env_name, kernel_name)
+                    # Replace invalid characters with dashes
+                    kernel_name = self.clean_kernel_name(kernel_name)
 
                 display_prefix = spec['display_name']
                 if display_prefix.startswith('Python'):
