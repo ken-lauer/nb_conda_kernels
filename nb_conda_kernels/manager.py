@@ -168,13 +168,19 @@ class CondaKernelSpecManager(KernelSpecManager):
         elif "envs directories" in conda_info:
             # micromamba
             self.log.debug("Detected micromamba. Info: %s", conda_info)
-            return {
+            envs = {
                 path: os.path.join(env_dir, path)
                 for env_dir in conda_info["envs directories"]
                 if os.path.exists(env_dir) and os.path.isdir(env_dir)
                 for path in os.listdir(env_dir)
                 if os.path.isdir(os.path.join(env_dir, path))
             }
+            if self.env_filter is not None:
+                for env_path in list(envs):
+                    if self._env_filter_regex.search(env_path):
+                        self.log.debug("Pruning %s as it matches the env_filter", env_path)
+                        envs.pop(env_path)
+            return envs
         else:
             raise RuntimeError("Unexpected conda_info dict")
 
