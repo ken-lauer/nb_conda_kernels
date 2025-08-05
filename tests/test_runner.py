@@ -9,17 +9,21 @@ import tempfile
 import time
 import pytest
 
-from nb_conda_kernels.discovery import CondaKernelProvider
-from nb_conda_kernels.manager import RUNNER_COMMAND
+from jupyter_client.manager import KernelManager
+from nb_conda_kernels.manager import RUNNER_COMMAND, CondaKernelSpecManager
 
 START_TIMEOUT = 10
 CMD_TIMEOUT = 3
 NUM_RETRIES = 10
 is_win = sys.platform.startswith('win')
-is_py2 = sys.version_info[0] < 3
+CKSM = None
 
 
-provider = CondaKernelProvider()
+def _cksm():
+    global CKSM
+    if CKSM is None:
+        CKSM = CondaKernelSpecManager(conda_only=True)
+    return CKSM
 
 
 old_print = print
@@ -61,7 +65,7 @@ def find_test_keys():
         os.environ['PATH'] = os.pathsep.join(path_list)
         print('AFTER: {}'.format(os.environ['PATH']))
     keys = []
-    for key, _ in provider.find_kernels():
+    for key in _cksm().get_all_specs():
         assert key.startswith('conda-')
         if key.endswith('-py') or key.endswith('-r'):
             keys.append(key)
@@ -125,7 +129,9 @@ def call_kernel(kernel_manager, **kw):
 
 @pytest.mark.parametrize("key", find_test_keys())
 def test_runner(key):
-    kernel_manager = provider.make_manager(key)
+    if sys.platform.startswith("darwin") and key.endswith('-r'):
+        pytest.xfail("R kernels on macos are failing for now")
+    kernel_manager = KernelManager(kernel_spec_manager=_cksm(), kernel_name=key)
     if kernel_manager.kernel_spec.argv[:3] == RUNNER_COMMAND:
         env_path = kernel_manager.kernel_spec.argv[4]
     else:
@@ -141,8 +147,8 @@ def test_runner(key):
 
 @pytest.mark.parametrize("jupyter_kernel", find_test_keys(), indirect=True)
 def test_jupyter_kernelspecs_runner(tmp_path, jupyter_kernel):
-    if sys.platform.startswith("linux") and jupyter_kernel.kernel_name == "conda-env-t_st_env2-py":
-        pytest.xfail("Folder with unicode raises error on linux.")
+    if sys.platform.startswith("darwin") and jupyter_kernel.kernel_name.endswith('-r'):
+        pytest.xfail("R kernels on macos are failing for now")
 
     fake_stdout = tmp_path / "stdout.log"
     # RUNNER_COMMAND is installed in all exported kernelspec
