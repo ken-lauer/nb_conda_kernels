@@ -278,7 +278,7 @@ class CondaKernelSpecManager(KernelSpecManager):
             self.log.exception("Unable to get envs")
             return {}
 
-        micromamba = shutil.which("micromamba")
+        micromamba = shutil.which("micromamba") or shutil.which("mamba")
         self.log.debug("Micromamba all specs envs=%s", all_envs)
         for env_name, env_path in all_envs.items():
             kspec_base = join(env_path, 'share', 'jupyter', 'kernels')
